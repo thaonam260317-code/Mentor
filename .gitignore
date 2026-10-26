@@ -1,0 +1,4 @@
+node_modules/
+*.backup.json
+mentor-dau-tu-*.json
+.DS_Store
