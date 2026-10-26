@@ -37,6 +37,7 @@
   --c-saving: #1baf7a;
   --c-realestate: #eb6834;
   --c-cash: #6250d6;
+  --c-brokercash: #0e8fa8;
   --font-display: "Newsreader", Georgia, "Times New Roman", serif;
   --font-body: "Be Vietnam Pro", system-ui, -apple-system, "Segoe UI", sans-serif;
   --r: 10px;
@@ -45,13 +46,13 @@
   --bg: #0f1513; --surface: #17201d; --sunken: #111916; --ink: #e5ece8; --muted: #95a59e; --line: #2a3632;
   --accent: #3fb894; --accent-ink: #06261d; --accent-soft: #173a30;
   --good: #4cc27f; --bad: #ef7a6c; --warn: #e3b252; --warn-soft: #3a2e14; --bad-soft: #3d1d19; --info-soft: #1a2a3c; --info: #82b1e3;
-  --c-stock: #3987e5; --c-gold: #c98500; --c-saving: #199e70; --c-realestate: #d95926; --c-cash: #9085e9;
+  --c-stock: #3987e5; --c-gold: #c98500; --c-saving: #199e70; --c-realestate: #d95926; --c-cash: #9085e9; --c-brokercash: #3fb6cc;
   color-scheme: dark; } }
 :root[data-theme="dark"] {
   --bg: #0f1513; --surface: #17201d; --sunken: #111916; --ink: #e5ece8; --muted: #95a59e; --line: #2a3632;
   --accent: #3fb894; --accent-ink: #06261d; --accent-soft: #173a30;
   --good: #4cc27f; --bad: #ef7a6c; --warn: #e3b252; --warn-soft: #3a2e14; --bad-soft: #3d1d19; --info-soft: #1a2a3c; --info: #82b1e3;
-  --c-stock: #3987e5; --c-gold: #c98500; --c-saving: #199e70; --c-realestate: #d95926; --c-cash: #9085e9;
+  --c-stock: #3987e5; --c-gold: #c98500; --c-saving: #199e70; --c-realestate: #d95926; --c-cash: #9085e9; --c-brokercash: #3fb6cc;
   color-scheme: dark; }
 
 * { box-sizing: border-box; }
@@ -375,15 +376,22 @@ button, .chip, select { touch-action: manipulation; -webkit-tap-highlight-color:
 (() => {
 const TYPES = {
   stock: { label: "Chứng khoán", color: "--c-stock" },
+  brokercash: { label: "Tiền trong TK chứng khoán", color: "--c-brokercash" },
   gold: { label: "Vàng", color: "--c-gold" },
   saving: { label: "Gửi tiết kiệm", color: "--c-saving" },
   realestate: { label: "Bất động sản", color: "--c-realestate" },
   cash: { label: "Tiền mặt", color: "--c-cash" },
 };
 const TYPE_KEYS = Object.keys(TYPES);
+const CASH_TYPES = ["cash", "brokercash"];
+// Older data kept broker cash as plain "cash"; move it to its own type once.
+function migrateHoldings(list) {
+  for (const h of list || []) if (h.type === "cash" && (h.id === "cash-broker" || /chứng khoán|tài khoản ck|\bck\b/i.test(h.name || ""))) h.type = "brokercash";
+  return list;
+}
 const DEFAULT_PROFILE = {
   goal: "", risk: "vừa", horizon: 5, monthlyExpense: 20000000, maxRiskPerTrade: 2,
-  target: { stock: 30, gold: 15, saving: 25, realestate: 20, cash: 10 },
+  target: { stock: 30, brokercash: 0, gold: 15, saving: 25, realestate: 20, cash: 10 },
 };
 const STATUS = { pending: "Chờ vào lệnh", open: "Đang giữ", closed: "Đã đóng", cancelled: "Hủy" };
 
@@ -544,6 +552,7 @@ function insights() {
     else out.push({ lvl: "ok", tag: "Quỹ dự phòng", title: `Quỹ dự phòng đủ ${(liquid / n(P.monthlyExpense)).toFixed(1)} tháng chi tiêu`, body: "Bạn có đệm an toàn để không phải bán tài sản lúc thị trường xấu." });
   }
   for (const k of TYPE_KEYS) {
+    if (k === "brokercash" && !n(P.target?.[k])) continue;
     const act = total ? s.by[k].value / total * 100 : 0, tgt = n(P.target?.[k]);
     const diff = act - tgt;
     if (Math.abs(diff) >= 8 && total > 0) {
@@ -588,7 +597,7 @@ function fmtDate(d) { if (!d) return ""; const [y, m, dd] = d.split("-"); return
 /* ---------- storage ---------- */
 let db = null;
 const LS = "mentor-dau-tu-v1";
-function lsLoad() { try { const d = JSON.parse(localStorage.getItem(LS) || "null"); if (d) { state.holdings = d.holdings || []; state.plans = d.plans || []; state.transactions = d.transactions || []; state.snapshots = d.snapshots || []; state.snapsLoaded = true; state.profile = { ...DEFAULT_PROFILE, ...(d.profile || {}) }; } } catch (e) {} }
+function lsLoad() { try { const d = JSON.parse(localStorage.getItem(LS) || "null"); if (d) { state.holdings = migrateHoldings(d.holdings || []); state.plans = d.plans || []; state.transactions = d.transactions || []; state.snapshots = d.snapshots || []; state.snapsLoaded = true; state.profile = { ...DEFAULT_PROFILE, ...(d.profile || {}) }; } } catch (e) {} }
 function lsSave() { try { localStorage.setItem(LS, JSON.stringify({ holdings: state.holdings, plans: state.plans, transactions: state.transactions, snapshots: state.snapshots, profile: state.profile })); } catch (e) {} }
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 
@@ -670,6 +679,8 @@ function renderOverview(s) {
   const passive = state.holdings.reduce((a, h) => a + (h.type === "saving" ? n(h.cost) * n(h.rate) / 100 / 12 : 0) + (h.type === "realestate" ? n(h.rent) : 0), 0);
   $("#kpis").innerHTML = [
     ["Quỹ dự phòng", months ? months.toFixed(1) + " tháng" : "—"],
+    ["Tiền mặt ngoài CK", vnd(s.by.cash.value)],
+    ["Sức mua TK chứng khoán", vnd(s.by.brokercash.value)],
     ["Thu nhập thụ động / tháng", vnd(passive)],
     ["Kế hoạch đang mở", active],
     ["Tỷ lệ thắng", closed.length ? `${Math.round(wins / closed.length * 100)}% (${wins}/${closed.length})` : "Chưa có lệnh đóng"],
@@ -707,7 +718,8 @@ function renderHoldings(s) {
       head = `<th>Tên</th><th class="r">Số tiền</th><th></th>`;
       body = rows.map(h => `<tr><td><b>${esc(h.name)}</b>${ex(h)}${h.note ? `<div class="sub">${esc(h.note)}</div>` : ""}</td><td class="r num">${vnd(n(h.cost))}</td><td class="r">${editBtn(h)}</td></tr>`).join("");
     }
-    return `<div class="panel"><div class="group-title"><span class="dot" style="background:var(${TYPES[k].color})"></span>${TYPES[k].label}<span class="sub num" style="margin-left:auto">${vnd(s.by[k].value)}</span></div><div class="tbl-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div></div>`;
+    const acct = k === "stock" && s.by.brokercash.value ? `<div class="sub num" style="margin:-4px 0 8px">Tổng tài khoản CK = cổ phiếu ${vnd(s.by.stock.value)} + tiền ${vnd(s.by.brokercash.value)} = <b>${vnd(s.by.stock.value + s.by.brokercash.value)}</b></div>` : "";
+    return `<div class="panel"><div class="group-title"><span class="dot" style="background:var(${TYPES[k].color})"></span>${TYPES[k].label}<span class="sub num" style="margin-left:auto">${vnd(s.by[k].value)}</span></div>${acct}<div class="tbl-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div></div>`;
   });
   const picked = shown.reduce((a, k) => a + s.by[k].value, 0);
   $("#holdings-body").innerHTML = (all ? "" : `<div class="sub num">Đang xem ${shown.map(k => TYPES[k].label).join(", ")}: <b>${vnd(picked)}</b> (${s.total ? (picked / s.total * 100).toLocaleString("vi-VN", { maximumFractionDigits: 1 }) : 0}% tổng tài sản)</div>`) + groups.join("");
@@ -834,7 +846,7 @@ function drawNetWorth() {
 }
 
 function drawPlBars(s) {
-  const rows = state.holdings.filter(h => h.type !== "cash").map(h => ({ h, v: valueOf(h) })).filter(r => r.v.pl).sort((a, b) => b.v.pl - a.v.pl);
+  const rows = state.holdings.filter(h => !CASH_TYPES.includes(h.type)).map(h => ({ h, v: valueOf(h) })).filter(r => r.v.pl).sort((a, b) => b.v.pl - a.v.pl);
   if (!rows.length) { $("#pl-bars").innerHTML = `<div class="empty">Chưa có tài sản nào có lãi/lỗ.</div>`; return; }
   const max = Math.max(...rows.map(r => Math.abs(r.v.pl)));
   const hasNeg = rows.some(r => r.v.pl < 0), hasPos = rows.some(r => r.v.pl > 0);
@@ -883,6 +895,7 @@ const HFIELDS = {
   gold: [["name", "Loại vàng", "text", "SJC miếng, nhẫn 9999…"], ["qty", "Số lượng (chỉ)", "number"], ["cost", "Giá mua / chỉ (đ)", "number"], ["price", "Giá bán ra hiện tại / chỉ (đ)", "number"], ["note", "Ghi chú", "text", "", true]],
   saving: [["name", "Ngân hàng", "text", "Vietcombank"], ["cost", "Tiền gốc (đ)", "number"], ["rate", "Lãi suất (%/năm)", "number"], ["term", "Kỳ hạn (tháng)", "number"], ["start", "Ngày gửi", "date"], ["note", "Ghi chú", "text", "", true]],
   realestate: [["name", "Tên tài sản", "text", "Căn hộ Thủ Đức"], ["cost", "Giá mua (đ)", "number"], ["price", "Giá ước tính hiện tại (đ)", "number"], ["loan", "Dư nợ vay còn lại (đ)", "number"], ["rent", "Thu nhập cho thuê / tháng (đ)", "number"], ["note", "Ghi chú", "text", "", true]],
+  brokercash: [["name", "Tên", "text", "Tiền trong TK chứng khoán (công ty CK)"], ["cost", "Số tiền / sức mua (đ)", "number"], ["note", "Ghi chú", "text", "", true]],
   cash: [["name", "Tên", "text", "Tài khoản thanh toán"], ["cost", "Số tiền (đ)", "number"], ["note", "Ghi chú", "text", "", true]],
 };
 function sheet(html) { $("#sheet-root").innerHTML = `<div class="sheet-bg" id="sheet-bg"><form class="sheet" id="sheet-form">${html}</form></div>`; const f = $("#sheet-form input, #sheet-form select"); f && f.focus(); }
@@ -1129,11 +1142,11 @@ const TX = {
   out: "Rút tiền ra chi tiêu",
 };
 const realizedTotal = () => state.transactions.reduce((a, t) => a + n(t.realized), 0);
-const cashRows = () => state.holdings.filter(h => h.type === "cash");
+const cashRows = () => state.holdings.filter(h => CASH_TYPES.includes(h.type)).sort((a, b) => (a.type === "brokercash" ? 0 : 1) - (b.type === "brokercash" ? 0 : 1));
 const tradeRows = () => state.holdings.filter(h => h.type === "stock" || h.type === "gold");
 const strip = h => { const { id, ...rest } = h; return rest; };
 function cashOpts(ext) {
-  return cashRows().map(h => `<option value="${esc(h.id)}">${esc(h.name)} · ${vnd(n(h.cost))}</option>`).join("") + (ext ? `<option value="ext">Tiền bên ngoài (không theo dõi trong app)</option>` : "");
+  return cashRows().map(h => `<option value="${esc(h.id)}">${h.type === "brokercash" ? "[TK CK] " : ""}${esc(h.name)} · ${vnd(n(h.cost))}</option>`).join("") + (ext ? `<option value="ext">Tiền bên ngoài (không theo dõi trong app)</option>` : "");
 }
 const selF = (key, label, opts, wide) => `<label class="f${wide ? " wide" : ""}">${label}<select id="t-${key}" name="${key}">${opts}</select></label>`;
 const numF = (key, label, val = "") => `<label class="f">${label}<input id="t-${key}" name="${key}" type="number" step="any" min="0" value="${esc(val)}"></label>`;
@@ -1248,7 +1261,7 @@ function txForm() {
         r.realized != null ? `Lãi/lỗ chốt: <b class="${r.realized >= 0 ? "pos" : "neg"}">${vnd(r.realized)}</b>` : "",
         ...r.ops.map(op => { const h = state.holdings.find(x => x.id === op.id);
           if (!op.data) return `Xóa khỏi danh mục: ${esc(h?.name)}`;
-          if (op.data.type === "cash") return `${esc(op.data.name)}: ${vnd(n(h?.cost))} → <b>${vnd(n(op.data.cost))}</b>`;
+          if (CASH_TYPES.includes(op.data.type)) return `${esc(op.data.name)}: ${vnd(n(h?.cost))} → <b>${vnd(n(op.data.cost))}</b>`;
           if (op.data.type === "saving") return `Sổ mới: ${esc(op.data.name)} ${vnd(n(op.data.cost))}`;
           return `${esc(op.data.name)}: ${h ? price(h.qty) + " → " : ""}<b>${price(op.data.qty)}</b>, giá vốn ${price(Math.round(op.data.cost))}`; }),
         ...r.warn.map(w => `<span class="neg">Lưu ý: ${esc(w)}</span>`),
@@ -1344,7 +1357,7 @@ function backupDue() { try { const t = +localStorage.getItem(BK_LS) || 0; return
 function exportData() { return { app: "mentor-dau-tu", version: 1, exportedAt: new Date().toISOString(), holdings: state.holdings, plans: state.plans, transactions: state.transactions, snapshots: state.snapshots, profile: state.profile }; }
 function applyData(d) {
   if (!d || !Array.isArray(d.holdings)) throw new Error("File không đúng định dạng sao lưu của app");
-  state.holdings = d.holdings; state.plans = d.plans || []; state.transactions = d.transactions || []; state.snapshots = d.snapshots || [];
+  state.holdings = migrateHoldings(d.holdings); state.plans = d.plans || []; state.transactions = d.transactions || []; state.snapshots = d.snapshots || [];
   state.profile = { ...DEFAULT_PROFILE, ...(d.profile || {}) };
   lsSave(); render(); fillProfile(); loadPrices();
 }
