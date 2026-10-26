@@ -75,6 +75,6 @@ if (!used.size) {
   process.exit(1);
 }
 const out = { updatedAt: nowIso(), source: [...used].join(", "), prices };
-await writeFile("data/prices.json", JSON.stringify(out, null, 1) + "\n");
+await writeFile("data/prices.json", JSON.stringify(out) + "\n");
 console.log(`Wrote ${Object.keys(prices).length} prices from ${out.source}.`, tickers.map(t => `${t}=${prices[t]?.price ?? "?"}`).join(" "));
 if (errors.length) console.log("Warnings:\n" + errors.join("\n"));
