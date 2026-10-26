@@ -173,6 +173,29 @@ tr:last-child td { border-bottom: 0; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .chip { border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 99px; padding: 6px 12px; font: 500 13px var(--font-body); cursor: pointer; }
 .chip:hover { border-color: var(--accent); }
+.chip[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.chip .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+.chip .num { color: var(--muted); font-weight: 400; }
+.plan-line { font: 600 13px/1.5 var(--font-body); background: var(--sunken); border-radius: 8px; padding: 8px 10px; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.pladder { display: grid; gap: 4px; }
+.pladder .row { display: grid; grid-template-columns: 64px 1fr auto; gap: 8px; align-items: baseline; padding: 5px 8px; border-radius: 6px; font-size: 13px; background: var(--sunken); }
+.pladder .row b { font-size: 14px; }
+.pladder .row.tp { background: var(--accent-soft); }
+.pladder .row.tp > span:first-child { color: var(--good); font-weight: 600; }
+.pladder .row.sl { background: var(--bad-soft); }
+.pladder .row.sl > span:first-child { color: var(--bad); font-weight: 600; }
+.pladder .row.en { background: var(--info-soft); }
+.pladder .row.en > span:first-child { color: var(--info); font-weight: 600; }
+.pladder .row.now { background: transparent; border: 1px dashed var(--line); }
+.rowset { grid-column: 1 / -1; display: grid; gap: 8px; }
+.rowline { display: grid; gap: 8px; align-items: center; }
+.rowline.e { grid-template-columns: 1fr 72px 40px; }
+.rowline.m { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.rowline.t { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) 64px 40px; }
+.rowline .btn { padding: 6px 0; }
+.rowline .out { grid-column: 1 / -1; font-size: 12px; color: var(--muted); margin-top: -4px; }
+.rowline .out:empty { display: none; }
 .ask { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
 
 /* forms */
@@ -286,6 +309,7 @@ button, .chip, select { touch-action: manipulation; -webkit-tap-highlight-color:
   <section class="view" id="v-holdings" hidden>
     <div class="row-head"><h2>Danh mục đang nắm giữ</h2><span style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" id="add-holding">Thêm tài sản</button><button class="btn primary" id="add-tx">Ghi giao dịch</button></span></div>
     <p class="sub" style="margin:0">Dùng <b>Ghi giao dịch</b> khi tiền chuyển giữa các khoản: mua vàng, mua cổ phiếu, gửi tiết kiệm, bán, tất toán. App tự trừ tiền mặt, cộng tài sản và tính lại giá vốn bình quân.</p>
+    <div class="chips" id="hold-filter" role="group" aria-label="Lọc theo loại tài sản"></div>
     <div id="holdings-body" style="display:grid;gap:18px"></div>
     <div class="panel"><div class="group-title">Lịch sử giao dịch<span class="sub num" id="tx-realized" style="margin-left:auto"></span></div><div id="tx-body"></div></div>
     <p class="foot-note">Giá cổ phiếu tự cập nhật khoảng 10h, 12h, 14h và 15h các ngày giao dịch (giờ dưới giá là lúc lấy giá). Giá vàng do bạn tự cập nhật. Tiết kiệm được tính lãi đơn theo số ngày đã gửi. Bất động sản tính theo giá trị ước tính trừ dư nợ vay.</p>
@@ -363,7 +387,7 @@ const DEFAULT_PROFILE = {
 };
 const STATUS = { pending: "Chờ vào lệnh", open: "Đang giữ", closed: "Đã đóng", cancelled: "Hủy" };
 
-const state = { holdings: [], plans: [], transactions: [], snapshots: [], nwRange: "3m", profile: { ...DEFAULT_PROFILE }, mode: "loading", tab: "overview", planFilter: "active", chat: [] };
+const state = { holdings: [], plans: [], transactions: [], snapshots: [], nwRange: "3m", profile: { ...DEFAULT_PROFILE }, mode: "loading", tab: "overview", planFilter: "active", holdFilter: new Set((() => { try { return JSON.parse(localStorage.getItem("mentor-dau-tu-v1-holdfilter") || "[]"); } catch (e) { return []; } })()), chat: [] };
 const $ = (s, el = document) => el.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const n = v => { const x = Number(v); return Number.isFinite(x) ? x : 0; };
@@ -413,16 +437,100 @@ function summary() {
   }
   return { by, total, pl, cost };
 }
-function planMath(p, total) {
-  const entry = n(p.entry), stop = n(p.stop), target = n(p.target), qty = n(p.qty);
-  const sell = p.side === "sell";
-  const riskPer = stop ? (sell ? stop - entry : entry - stop) : null;
-  const rewardPer = target ? (sell ? entry - target : target - entry) : null;
-  const rr = riskPer > 0 && rewardPer != null ? rewardPer / riskPer : null;
-  const riskAmt = riskPer != null && riskPer > 0 ? riskPer * qty : null;
+/* ---------- trading-plan standard: units, parsing, rounding ---------- */
+// Every plan is stored in one standard: đ per share for stocks, đ per chỉ for gold.
+const CHI_PER = { chi: 1, luong: 10, gram: 1 / 3.75 }; // chỉ contained in one unit (1 chỉ = 3,75 g)
+const UNIT_LABEL = { chi: "chỉ", luong: "cây (lượng)", gram: "gram" };
+const PLAN_TYPES = { stock: "Chứng khoán", gold: "Vàng", saving: "Tiết kiệm" };
+const TEMPLATES = {
+  stock: { swing: "Lướt sóng (1–8 tuần)", hold: "Nắm giữ dài hạn", custom: "Tự đặt" },
+  gold: { accumulate: "Tích lũy nhiều nấc", takeprofit: "Chốt lời vàng đang có", custom: "Tự đặt" },
+  saving: { renew: "Tái tục / chuyển sổ tiết kiệm" },
+};
+const SIZE_MODES = { risk: "Theo rủi ro tối đa", qty: "Số lượng", amount: "Số tiền", pct: "% tài sản" };
+
+// Reads "34.15", "34,150", "34k", "14,8tr", "1.2 tỷ" as a number (before unit conversion).
+function parseAmount(raw) {
+  let s = String(raw ?? "").trim().toLowerCase().replace(/\s+/g, "").replace(/vnđ|vnd|đ$/g, "");
+  if (!s) return null;
+  const m = s.match(/(nghìn|ngàn|triệu|trieu|tỷ|ty|tr|k|m|b)$/);
+  const mult = m ? { k: 1e3, "nghìn": 1e3, "ngàn": 1e3, tr: 1e6, "triệu": 1e6, trieu: 1e6, m: 1e6, "tỷ": 1e9, ty: 1e9, b: 1e9 }[m[1]] : 1;
+  if (m) s = s.slice(0, -m[1].length);
+  if (!/^\d[\d.,]*$/.test(s)) return null;
+  const dots = (s.match(/\./g) || []).length, commas = (s.match(/,/g) || []).length;
+  let num = s;
+  if (dots && commas) { const dec = s.lastIndexOf(".") > s.lastIndexOf(",") ? "." : ","; num = s.split(dec === "." ? "," : ".").join("").replace(dec, "."); }
+  else if (dots + commas > 1) num = s.replace(/[.,]/g, "");
+  else if (dots + commas === 1) { const sep = dots ? "." : ","; const after = s.split(sep)[1]; num = after.length === 3 && !m ? s.replace(sep, "") : s.replace(sep, "."); }
+  const v = Number(num) * mult;
+  return Number.isFinite(v) ? v : null;
+}
+// Percent / R / plain quantity: "6", "-6,5", "1.5R", "7%".
+function parseNum(raw) {
+  const s = String(raw ?? "").trim().replace(/−/g, "-").replace(/[%rR\s]/g, "").replace(",", ".");
+  if (!s) return null;
+  const v = Number(s);
+  return Number.isFinite(v) ? v : null;
+}
+const hasSuffix = raw => /[a-zđỷệ]$/i.test(String(raw ?? "").trim());
+// What the user typed -> standard price. Bare stock prices under 1.000 are board style (34.15 = 34.150 đ);
+// bare gold prices under 10.000 are in triệu.
+function toStdPrice(raw, type, unit) {
+  let v = parseAmount(raw); if (!(v > 0)) return null;
+  if (type === "stock") { if (!hasSuffix(raw) && v < 1000) v *= 1000; return v; }
+  if (type === "gold") { if (!hasSuffix(raw) && v < 10000) v *= 1e6; return v / CHI_PER[unit || "chi"]; }
+  return v;
+}
+const tickSize = p => p < 10000 ? 10 : p < 50000 ? 50 : 100; // HOSE price steps
+function roundPrice(p, type) {
+  if (!(p > 0)) return p;
+  if (type === "stock") { const t = tickSize(p); return Math.round(p / t) * t; }
+  if (type === "gold") return Math.round(p / 1000) * 1000;
+  return Math.round(p);
+}
+function roundQty(q, type) {
+  if (!(q > 0)) return 0;
+  if (type === "stock") return Math.floor(q / 100) * 100 || Math.floor(q); // lots of 100, odd lot if smaller
+  return Math.floor(q * 10 + 1e-9) / 10; // gold to 0,1 chỉ
+}
+const fmtR = r => r == null ? "" : `${r.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}R`;
+const qtyUnit = type => type === "gold" ? "chỉ" : "cp";
+
+// Old plans had one entry/target; new plans have ladders. Both read the same way here.
+function normPlan(p) {
+  const type = p.assetType || "stock";
+  const entries = Array.isArray(p.entries) && p.entries.length ? p.entries : (n(p.entry) ? [{ price: n(p.entry), pct: 100 }] : []);
+  const targets = Array.isArray(p.targets) ? p.targets : (n(p.target) ? [{ price: n(p.target), pct: 100 }] : []);
+  return { ...p, type, entries, targets, stop: n(p.stop) || null, qty: n(p.qty) };
+}
+// Plans are long-only (Vietnamese cash market): a "sell" plan manages shares already held.
+function planMath(p0, total) {
+  const p = normPlan(p0);
+  const wsum = p.entries.reduce((a, e) => a + n(e.pct), 0);
+  const avg = wsum ? p.entries.reduce((a, e) => a + n(e.price) * n(e.pct), 0) / wsum : 0;
+  const R = p.stop && avg > p.stop ? avg - p.stop : null;
+  const tsum = p.targets.reduce((a, t) => a + n(t.pct), 0);
+  const targets = p.targets.map(t => ({ ...t, pctMove: avg ? (n(t.price) - avg) / avg * 100 : null, r: R ? (n(t.price) - avg) / R : null }));
+  const rewardPer = tsum && avg ? p.targets.reduce((a, t) => a + (n(t.price) - avg) * n(t.pct), 0) / tsum : null;
+  const rr = R && rewardPer != null ? rewardPer / R : null;
+  const riskAmt = R && p.qty ? R * p.qty : null;
   const riskPct = riskAmt != null && total > 0 ? riskAmt / total * 100 : null;
-  const size = entry * qty;
-  return { riskPer, rewardPer, rr, riskAmt, riskPct, size, stopPct: stop && entry ? (stop - entry) / entry * 100 : null, targetPct: target && entry ? (target - entry) / entry * 100 : null };
+  return { type: p.type, avg, riskPer: R, rewardPer, rr, riskAmt, riskPct, size: avg * p.qty, targets,
+    stopPct: p.stop && avg ? (p.stop - avg) / avg * 100 : null, targetPct: targets.length ? targets[targets.length - 1].pctMove : null,
+    rewardAmt: rewardPer != null && p.qty ? rewardPer * p.qty : null };
+}
+// One standard line per plan, e.g. "MUA BID · Vào 33.500–34.000 · SL 31.800 (−6%, 1R) · TP1 37.000 (+9%, 1,5R, 50%)".
+function planLine(p0) {
+  const p = normPlan(p0);
+  if (p.type === "saving") return `TIẾT KIỆM ${p.ticker} · ${vnd(n(p.amount))} · đáo hạn ${fmtDate(p.maturity) || "?"} · tái tục nếu lãi ≥ ${price(p.targetRate)}%/năm${p.altAction ? " · nếu không: " + p.altAction : ""}`;
+  const m = planMath(p0, summary().total);
+  const ps = p.entries.map(e => n(e.price)).filter(Boolean);
+  const ent = !ps.length ? "—" : p.entries.length > 1 ? `${price(Math.min(...ps))}–${price(Math.max(...ps))} (${p.entries.length} nấc)` : price(ps[0]);
+  const parts = [`${p.side === "sell" ? "BÁN" : "MUA"} ${p.ticker}`, `Vào ${ent}${p.type === "gold" ? " đ/chỉ" : ""}`];
+  parts.push(p.stop ? `SL ${price(p.stop)} (${pct(m.stopPct)}, 1R)` : "SL chưa đặt");
+  m.targets.forEach((t, i) => parts.push(`TP${i + 1} ${price(t.price)} (${pct(t.pctMove)}${t.r != null ? ", " + fmtR(t.r) : ""}, ${n(t.pct)}%)`));
+  if (p.qty) parts.push(`KL ${price(p.qty)} ${qtyUnit(p.type)}`);
+  return parts.join(" · ");
 }
 
 /* ---------- mentor rules ---------- */
@@ -461,10 +569,14 @@ function insights() {
     if (h.type === "realestate" && n(h.price) > 0 && n(h.loan) / n(h.price) > 0.5) out.push({ lvl: "warn", tag: "Đòn bẩy", title: `${h.name}: dư nợ ${Math.round(n(h.loan) / n(h.price) * 100)}% giá trị`, body: "Đòn bẩy trên 50% khiến bạn nhạy với lãi suất thả nổi. Kiểm tra dòng tiền trả nợ hàng tháng so với thu nhập." });
   }
   for (const p of state.plans.filter(p => ["pending", "open"].includes(p.status))) {
+    if (p.assetType === "saving") {
+      if (p.status === "pending" && p.maturity && daysBetween(today(), p.maturity) < 0) out.push({ lvl: "info", tag: "Kế hoạch", title: `Kế hoạch sổ ${p.ticker} đã qua ngày đáo hạn`, body: "Cập nhật kết quả: đã tái tục hay chuyển tiền sang khoản khác, rồi đóng kế hoạch." });
+      continue;
+    }
     const m = planMath(p, total);
-    if (!n(p.stop)) out.push({ lvl: "crit", tag: "Kế hoạch", title: `Lệnh ${p.ticker} chưa có điểm dừng lỗ`, body: "Mọi lệnh cần một mức giá mà tại đó bạn thừa nhận mình sai. Thêm điểm dừng lỗ trước khi vào lệnh." });
+    if (!n(p.stop) && p.template !== "accumulate") out.push({ lvl: "crit", tag: "Kế hoạch", title: `Lệnh ${p.ticker} chưa có điểm dừng lỗ`, body: "Mọi lệnh cần một mức giá mà tại đó bạn thừa nhận mình sai. Thêm điểm dừng lỗ trước khi vào lệnh." });
     else if (m.rr != null && m.rr < 2) out.push({ lvl: "warn", tag: "Kế hoạch", title: `Lệnh ${p.ticker} có tỷ lệ lời/lỗ chỉ ${m.rr.toFixed(1)}`, body: "Mục tiêu nên gấp ít nhất 2 lần rủi ro, để chỉ cần đúng 40% số lần vẫn có lãi." });
-    if (m.riskPct != null && m.riskPct > n(P.maxRiskPerTrade)) out.push({ lvl: "warn", tag: "Khối lượng", title: `Lệnh ${p.ticker} rủi ro ${m.riskPct.toFixed(1)}% tài sản`, body: `Vượt giới hạn ${P.maxRiskPerTrade}% bạn đặt. Giảm khối lượng xuống khoảng ${Math.floor(n(P.maxRiskPerTrade) / 100 * total / m.riskPer).toLocaleString("vi-VN")} để đúng kỷ luật.` });
+    if (m.riskPct != null && m.riskPer && m.riskPct > n(P.maxRiskPerTrade)) out.push({ lvl: "warn", tag: "Khối lượng", title: `Lệnh ${p.ticker} rủi ro ${m.riskPct.toFixed(1)}% tài sản`, body: `Vượt giới hạn ${P.maxRiskPerTrade}% bạn đặt. Giảm khối lượng xuống khoảng ${price(roundQty(n(P.maxRiskPerTrade) / 100 * total / m.riskPer, m.type))} để đúng kỷ luật.` });
     if (p.status === "pending" && p.deadline && daysBetween(today(), p.deadline) < 0) out.push({ lvl: "info", tag: "Kế hoạch", title: `Kế hoạch ${p.ticker} đã quá hạn`, body: "Điều kiện vào lệnh không xảy ra đúng hạn. Xem lại lý do, rồi hủy hoặc cập nhật kế hoạch." });
   }
   const order = { crit: 0, warn: 1, info: 2, ok: 3 };
@@ -567,10 +679,14 @@ function renderOverview(s) {
 }
 
 function renderHoldings(s) {
-  if (!state.holdings.length) { $("#holdings-body").innerHTML = `<div class="empty">Chưa có tài sản nào. Bấm <b>Thêm tài sản</b> để nhập cổ phiếu, vàng, sổ tiết kiệm hoặc bất động sản.</div>`; return; }
+  if (!state.holdings.length) { $("#hold-filter").innerHTML = ""; $("#holdings-body").innerHTML = `<div class="empty">Chưa có tài sản nào. Bấm <b>Thêm tài sản</b> để nhập cổ phiếu, vàng, sổ tiết kiệm hoặc bất động sản.</div>`; return; }
   const ex = h => h.example ? ` <span class="pill ex">Ví dụ</span>` : "";
   const editBtn = h => `<button class="btn ghost" data-edit-h="${esc(h.id)}">Sửa</button>`;
-  const groups = TYPE_KEYS.map(k => {
+  const sel = state.holdFilter, all = !sel.size;
+  $("#hold-filter").innerHTML = `<button class="chip" data-hf="all" aria-pressed="${all}">Tất cả <span class="num">${state.holdings.length}</span></button>`
+    + TYPE_KEYS.filter(k => state.holdings.some(h => h.type === k)).map(k => `<button class="chip" data-hf="${k}" aria-pressed="${sel.has(k)}"><span class="dot" style="background:var(${TYPES[k].color})"></span>${TYPES[k].label} <span class="num">${state.holdings.filter(h => h.type === k).length} · ${vnd(s.by[k].value)}</span></button>`).join("");
+  const shown = TYPE_KEYS.filter(k => all || sel.has(k));
+  const groups = shown.map(k => {
     const rows = state.holdings.filter(h => h.type === k);
     if (!rows.length) return "";
     let head, body;
@@ -593,26 +709,37 @@ function renderHoldings(s) {
     }
     return `<div class="panel"><div class="group-title"><span class="dot" style="background:var(${TYPES[k].color})"></span>${TYPES[k].label}<span class="sub num" style="margin-left:auto">${vnd(s.by[k].value)}</span></div><div class="tbl-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div></div>`;
   });
-  $("#holdings-body").innerHTML = groups.join("");
+  const picked = shown.reduce((a, k) => a + s.by[k].value, 0);
+  $("#holdings-body").innerHTML = (all ? "" : `<div class="sub num">Đang xem ${shown.map(k => TYPES[k].label).join(", ")}: <b>${vnd(picked)}</b> (${s.total ? (picked / s.total * 100).toLocaleString("vi-VN", { maximumFractionDigits: 1 }) : 0}% tổng tài sản)</div>`) + groups.join("");
 }
 
 function renderPlans(s) {
   const filters = { active: "Đang theo dõi", closed: "Đã đóng", all: "Tất cả" };
-  $("#plan-filter").innerHTML = Object.entries(filters).map(([k, v]) => `<button class="chip" data-pf="${k}" style="${state.planFilter === k ? "border-color:var(--accent);color:var(--accent)" : ""}">${v}</button>`).join("");
+  $("#plan-filter").innerHTML = Object.entries(filters).map(([k, v]) => `<button class="chip" data-pf="${k}" aria-pressed="${state.planFilter === k}">${v}</button>`).join("");
   const list = state.plans.filter(p => state.planFilter === "all" || (state.planFilter === "active" ? ["pending", "open"].includes(p.status) : ["closed", "cancelled"].includes(p.status)))
     .sort((a, b) => (b.created || "").localeCompare(a.created || ""));
-  if (!list.length) { $("#plans-body").innerHTML = `<div class="empty" style="grid-column:1/-1">Chưa có kế hoạch nào ở đây. Một kế hoạch tốt có: điểm vào, điểm dừng lỗ, mục tiêu, khối lượng và lý do. Bấm <b>Lập kế hoạch mới</b>.</div>`; return; }
-  $("#plans-body").innerHTML = list.map(p => {
-    const m = planMath(p, s.total);
-    const rrCls = m.rr == null ? "" : m.rr >= 2 ? "pos" : "neg";
-    return `<article class="plan">
-      <div class="plan-head"><span class="t">${esc(p.ticker)} <span class="pill ${p.side === "sell" ? "sell" : "buy"}">${p.side === "sell" ? "Bán" : "Mua"}</span>${p.example ? ` <span class="pill ex">Ví dụ</span>` : ""}</span><span class="pill">${STATUS[p.status] || p.status}</span></div>
-      <div class="ladder num">
-        <div><div class="k">Dừng lỗ</div><div class="v neg">${n(p.stop) ? price(p.stop) : "Chưa có"}</div><div class="k">${m.stopPct != null ? pct(m.stopPct) : ""}</div></div>
-        <div><div class="k">Vào lệnh</div><div class="v">${price(p.entry)}</div><div class="k">${n(p.qty) ? price(p.qty) + " đv" : ""}</div></div>
-        <div><div class="k">Mục tiêu</div><div class="v pos">${n(p.target) ? price(p.target) : "—"}</div><div class="k">${m.targetPct != null ? pct(m.targetPct) : ""}</div></div>
-      </div>
-      <div class="sub num">Lời/lỗ kỳ vọng: <b class="${rrCls}">${m.rr != null ? m.rr.toFixed(1) + " : 1" : "—"}</b> · Rủi ro: <b>${m.riskAmt != null ? vnd(m.riskAmt) : "—"}</b>${m.riskPct != null ? ` (${m.riskPct.toFixed(1)}% tài sản)` : ""}</div>
+  if (!list.length) { $("#plans-body").innerHTML = `<div class="empty" style="grid-column:1/-1">Chưa có kế hoạch nào ở đây. Một kế hoạch tốt có: điểm vào, điểm dừng lỗ, mục tiêu, khối lượng và lý do. Bấm <b>Lập kế hoạch mới</b> và chọn một mẫu để bắt đầu.</div>`; return; }
+  $("#plans-body").innerHTML = list.map(p0 => {
+    const p = normPlan(p0);
+    const tplName = TEMPLATES[p.type]?.[p.template] || "";
+    const head = `<div class="plan-head"><span class="t">${esc(p.ticker)} ${p.type === "saving" ? `<span class="pill">Tiết kiệm</span>` : `<span class="pill ${p.side === "sell" ? "sell" : "buy"}">${p.side === "sell" ? "Bán" : "Mua"}</span>`}</span><span class="pill">${STATUS[p.status] || p.status}</span></div>
+      ${tplName ? `<div class="sub">${PLAN_TYPES[p.type]} · ${esc(tplName)}</div>` : ""}
+      <div class="plan-line">${esc(planLine(p0))}</div>`;
+    let body = "";
+    if (p.type !== "saving") {
+      const m = planMath(p0, s.total);
+      const cur = state.holdings.find(h => h.type === p.type && String(h.name).toUpperCase() === String(p.ticker).toUpperCase());
+      const rows = [
+        ...m.targets.map((t, i) => ({ cls: "tp", k: `TP${i + 1}`, v: t.price, note: `${pct(t.pctMove)}${t.r != null ? " · " + fmtR(t.r) : ""} · bán ${n(t.pct)}%` })),
+        ...p.entries.map((e, i) => ({ cls: "en", k: p.entries.length > 1 ? `Vào ${i + 1}` : "Vào", v: e.price, note: `${n(e.pct)}% vị thế` })),
+        ...(p.stop ? [{ cls: "sl", k: "SL", v: p.stop, note: `${pct(m.stopPct)} · 1R` }] : []),
+        ...(cur && n(cur.price) && p.type === "stock" ? [{ cls: "now", k: "Hiện tại", v: n(cur.price), note: m.avg ? pct((n(cur.price) - m.avg) / m.avg * 100) + " so với giá vào" : "" }] : []),
+      ].filter(r => n(r.v)).sort((a, b) => n(b.v) - n(a.v));
+      const rrCls = m.rr == null ? "" : m.rr >= 2 ? "pos" : "neg";
+      body = `<div class="pladder num">${rows.map(r => `<div class="row ${r.cls}"><span>${r.k}</span><b>${price(r.v)}</b><span class="sub">${esc(r.note)}</span></div>`).join("")}</div>
+        <div class="sub num">Lời/lỗ kỳ vọng: <b class="${rrCls}">${m.rr != null ? m.rr.toLocaleString("vi-VN", { maximumFractionDigits: 1 }) + " : 1" : "—"}</b> · Rủi ro: <b>${m.riskAmt != null ? vnd(m.riskAmt) : "—"}</b>${m.riskPct != null ? ` (${m.riskPct.toFixed(1)}% tài sản)` : ""}${m.size ? ` · Giá trị: <b>${vnd(m.size)}</b>` : ""}</div>`;
+    }
+    return `<article class="plan">${head}${body}
       ${p.reason ? `<p class="reason">${esc(p.reason)}</p>` : ""}
       ${p.status === "closed" ? `<div class="sub">Kết quả: <b class="${n(p.resultPl) >= 0 ? "pos" : "neg"}">${vnd(n(p.resultPl))}</b>${p.lesson ? ` · Bài học: ${esc(p.lesson)}` : ""}</div>` : ""}
       <div class="plan-foot"><span class="sub">${p.deadline ? "Hạn: " + fmtDate(p.deadline) : "Lập ngày " + fmtDate((p.created || "").slice(0, 10))}</span><button class="btn ghost" data-edit-p="${esc(p.id)}">Sửa / cập nhật</button></div>
@@ -785,45 +912,211 @@ function holdingForm(h) {
   };
   draw(type);
 }
+/* ---------- plan form ---------- */
+const addDays = d => new Date(Date.now() + d * 86400000).toLocaleDateString("en-CA", { timeZone: "Asia/Ho_Chi_Minh" });
+// Shows a standard price back in the unit the user is typing in.
+const inUnit = (v, type, unit) => type === "gold" ? v * CHI_PER[unit || "chi"] : v;
+function refPrice(f) {
+  const h = state.holdings.find(h => h.type === f.assetType && String(h.name).toUpperCase() === String(f.ticker || "").trim().toUpperCase());
+  return h ? { price: n(h.price), cost: n(h.cost), qty: n(h.qty) } : null;
+}
+function applyTemplate(f) {
+  const ref = refPrice(f), u = f.unit || "chi";
+  const show = v => v ? String(Math.round(inUnit(v, f.assetType, u))) : "";
+  switch (f.template) {
+    case "swing": Object.assign(f, { side: "buy", entries: [{ raw: show(ref?.price), pct: 100 }], stop: { mode: "pct", raw: "7" },
+      targets: [{ mode: "r", raw: "1.5", pct: 50 }, { mode: "r", raw: "3", pct: 50 }], size: { mode: "risk", raw: "" }, deadline: addDays(30) }); break;
+    case "hold": Object.assign(f, { side: "buy", entries: [{ raw: show(ref?.price), pct: 50 }, { raw: show(ref?.price && ref.price * 0.93), pct: 50 }], stop: { mode: "pct", raw: "15" },
+      targets: [{ mode: "pct", raw: "30", pct: 50 }, { mode: "pct", raw: "60", pct: 50 }], size: { mode: "pct", raw: "10" }, deadline: "" }); break;
+    case "accumulate": Object.assign(f, { side: "buy", entries: [0, 0.03, 0.06].map(d => ({ raw: show(ref?.price && ref.price * (1 - d)), pct: d === 0 ? 34 : 33 })), stop: { mode: "pct", raw: "" },
+      targets: [{ mode: "pct", raw: "15", pct: 100 }], size: { mode: "amount", raw: "" }, deadline: addDays(90) }); break;
+    case "takeprofit": Object.assign(f, { side: "sell", entries: [{ raw: show(ref?.cost || ref?.price), pct: 100 }], stop: { mode: "pct", raw: "5" },
+      targets: [{ mode: "pct", raw: "5", pct: 50 }, { mode: "pct", raw: "10", pct: 50 }], size: { mode: "qty", raw: ref?.qty ? String(ref.qty / CHI_PER[u]) : "" }, deadline: addDays(60) }); break;
+  }
+}
+// Turns the raw form into standard numbers plus a readable note for every row.
+function computePlan(f) {
+  const type = f.assetType, unit = type === "gold" ? f.unit || "chi" : null, total = summary().total;
+  const out = { entries: [], targets: [], notes: {}, warn: [] };
+  const per = type === "gold" ? "đ/chỉ" : "đ/cp";
+  f.entries.forEach((e, i) => {
+    const pr = roundPrice(toStdPrice(e.raw, type, unit), type);
+    out.notes["e" + i] = pr ? `= ${price(pr)} ${per}` : e.raw ? "Không đọc được giá" : "";
+    if (pr) out.entries.push({ price: pr, pct: n(e.pct) || 0 });
+  });
+  const wsum = out.entries.reduce((a, e) => a + e.pct, 0);
+  if (out.entries.length && wsum !== 100) {
+    if (wsum > 0) out.entries.forEach(e => e.pct = Math.round(e.pct / wsum * 1000) / 10);
+    else out.entries.forEach(e => e.pct = Math.round(1000 / out.entries.length) / 10);
+    out.warn.push(`Tỷ trọng các nấc vào lệnh được chia lại cho đủ 100%.`);
+  }
+  const avg = out.entries.length ? out.entries.reduce((a, e) => a + e.price * e.pct, 0) / out.entries.reduce((a, e) => a + e.pct, 0) : 0;
+  out.avg = avg;
+  let stop = null;
+  if (f.stop.raw !== "" && f.stop.raw != null) {
+    if (f.stop.mode === "price") stop = toStdPrice(f.stop.raw, type, unit);
+    else { const v = parseNum(f.stop.raw); if (v != null && avg) stop = avg * (1 - Math.abs(v) / 100); }
+    stop = roundPrice(stop, type);
+  }
+  const R = stop && avg > stop ? avg - stop : null;
+  out.stop = stop || null;
+  out.notes.stop = stop ? `= ${price(stop)} ${per} · ${pct((stop - avg) / avg * 100)} · 1R = ${price(R || 0)}` : f.stop.raw ? "Không đọc được" : "Chưa đặt dừng lỗ";
+  if (stop && avg && stop >= avg) out.warn.push("Dừng lỗ phải thấp hơn giá vào trung bình.");
+  f.targets.forEach((t, i) => {
+    let tp = null; const v = t.mode === "price" ? null : parseNum(t.raw);
+    if (t.mode === "price") tp = toStdPrice(t.raw, type, unit);
+    else if (t.mode === "pct" && v != null && avg) tp = avg * (1 + Math.abs(v) / 100);
+    else if (t.mode === "r" && v != null && avg) tp = R ? avg + Math.abs(v) * R : null;
+    tp = roundPrice(tp, type);
+    if (tp) out.targets.push({ price: tp, pct: n(t.pct) || 0 });
+    out.notes["t" + i] = tp ? `= ${price(tp)} ${per} · ${pct((tp - avg) / avg * 100)}${R ? " · " + fmtR((tp - avg) / R) : ""}` : t.mode === "r" && !R ? "Cần đặt dừng lỗ để tính theo R" : t.raw ? "Không đọc được" : "";
+  });
+  const tsum = out.targets.reduce((a, t) => a + t.pct, 0);
+  if (tsum > 100) out.warn.push(`Tổng tỷ lệ chốt lời là ${tsum}%, vượt 100% vị thế.`);
+  // position size, in shares or chỉ
+  const P = state.profile, sv = f.size.raw;
+  let qty = 0;
+  if (f.size.mode === "qty") qty = (parseNum(sv) || 0) * (type === "gold" ? CHI_PER[unit] : 1);
+  else if (f.size.mode === "amount") { const a = parseAmount(sv); qty = a && avg ? a / avg : 0; }
+  else if (f.size.mode === "pct") { const v = parseNum(sv); qty = v && avg ? v / 100 * total / avg : 0; }
+  else { const riskPctCap = parseNum(sv) ?? n(P.maxRiskPerTrade); qty = R ? riskPctCap / 100 * total / R : 0; }
+  out.qty = roundQty(qty, type);
+  out.notes.size = out.qty ? `= ${price(out.qty)} ${qtyUnit(type)}${type === "gold" && unit !== "chi" ? ` (${price(out.qty / CHI_PER[unit])} ${UNIT_LABEL[unit]})` : ""} · ${vnd(out.qty * avg)}${type === "stock" && out.qty % 100 ? " · lô lẻ" : ""}`
+    : f.size.mode === "risk" && !R ? "Cần giá vào và dừng lỗ để tính khối lượng theo rủi ro" : "";
+  return out;
+}
+function planToForm(p) {
+  if (p?.form) return JSON.parse(JSON.stringify(p.form));
+  const base = { assetType: "stock", template: "swing", ticker: "", side: "buy", unit: "chi", entries: [{ raw: "", pct: 100 }], stop: { mode: "pct", raw: "7" },
+    targets: [{ mode: "r", raw: "1.5", pct: 50 }, { mode: "r", raw: "3", pct: 50 }], size: { mode: "risk", raw: "" }, reason: "", status: "pending", deadline: addDays(30), resultPl: "", lesson: "",
+    holdingId: "", targetRate: "", altAction: "" };
+  if (!p) return base;
+  const q = normPlan(p);
+  return { ...base, assetType: q.type, template: q.template || "custom", ticker: q.ticker || "", side: q.side || "buy",
+    entries: q.entries.length ? q.entries.map(e => ({ raw: String(e.price), pct: e.pct })) : base.entries,
+    stop: { mode: "price", raw: q.stop ? String(q.stop) : "" }, targets: q.targets.map(t => ({ mode: "price", raw: String(t.price), pct: t.pct })),
+    size: { mode: "qty", raw: q.qty ? String(q.qty) : "" }, reason: q.reason || "", status: q.status || "pending", deadline: q.deadline || "",
+    resultPl: q.resultPl ?? "", lesson: q.lesson || "", holdingId: q.holdingId || "", targetRate: q.targetRate ?? "", altAction: q.altAction || "" };
+}
 function planForm(p) {
-  const v = p || { side: "buy", status: "pending" };
-  sheet(`<h2>${p ? "Cập nhật kế hoạch" : "Lập kế hoạch giao dịch"}</h2>
-    <div class="fields">
-      <label class="f">Mã / tài sản<input id="f-ticker" name="ticker" value="${esc(v.ticker || "")}" placeholder="FPT, vàng SJC…" list="tickers"></label>
-      <datalist id="tickers">${state.holdings.map(h => `<option value="${esc(h.name)}">`).join("")}</datalist>
-      <label class="f">Hành động<select id="f-side" name="side"><option value="buy" ${v.side !== "sell" ? "selected" : ""}>Mua</option><option value="sell" ${v.side === "sell" ? "selected" : ""}>Bán</option></select></label>
-      <label class="f">Giá vào lệnh<input id="f-entry" name="entry" type="number" step="any" min="0" value="${esc(v.entry ?? "")}"></label>
-      <label class="f">Khối lượng<input id="f-qty" name="qty" type="number" step="any" min="0" value="${esc(v.qty ?? "")}"></label>
-      <label class="f">Điểm dừng lỗ<input id="f-stop" name="stop" type="number" step="any" min="0" value="${esc(v.stop ?? "")}"></label>
-      <label class="f">Mục tiêu chốt lời<input id="f-target" name="target" type="number" step="any" min="0" value="${esc(v.target ?? "")}"></label>
-      <label class="f wide">Lý do vào lệnh<textarea id="f-reason" name="reason" placeholder="Luận điểm, tín hiệu, điều gì sẽ khiến bạn sai?">${esc(v.reason || "")}</textarea></label>
-      <label class="f">Trạng thái<select id="f-status" name="status">${Object.entries(STATUS).map(([k, l]) => `<option value="${k}" ${v.status === k ? "selected" : ""}>${l}</option>`).join("")}</select></label>
-      <label class="f">Hạn thực hiện<input id="f-deadline" name="deadline" type="date" value="${esc(v.deadline || "")}"></label>
-      <label class="f">Kết quả lãi/lỗ (khi đóng, đ)<input id="f-resultPl" name="resultPl" type="number" step="any" value="${esc(v.resultPl ?? "")}"></label>
-      <label class="f">Bài học rút ra<input id="f-lesson" name="lesson" value="${esc(v.lesson || "")}"></label>
-    </div>
-    <div class="calc num" id="calc"></div>
-    <div class="sheet-actions"><span>${p ? `<button type="button" class="btn danger" id="del">Xóa</button>` : ""}</span><span style="display:flex;gap:8px"><button type="button" class="btn" id="cancel">Hủy</button><button class="btn primary" type="submit">Lưu</button></span></div>`);
-  const read = () => { const fd = new FormData($("#sheet-form")); const o = {}; for (const [k, val] of fd) o[k] = val; for (const k of ["entry", "qty", "stop", "target", "resultPl"]) o[k] = o[k] === "" ? null : Number(o[k]); o.ticker = String(o.ticker || "").trim(); return o; };
-  const calc = () => {
-    const o = read(), s = summary(), m = planMath(o, s.total), P = state.profile;
-    const suggest = m.riskPer > 0 ? Math.floor(n(P.maxRiskPerTrade) / 100 * s.total / m.riskPer) : null;
-    $("#calc").innerHTML = `Giá trị lệnh: <b>${vnd(m.size)}</b> (${s.total ? (m.size / s.total * 100).toFixed(1) : 0}% tài sản)<br>
-      Lời/lỗ kỳ vọng: <b class="${m.rr != null && m.rr >= 2 ? "pos" : "neg"}">${m.rr != null ? m.rr.toFixed(2) + " : 1" : "cần nhập dừng lỗ và mục tiêu"}</b><br>
-      Số tiền chịu rủi ro: <b>${m.riskAmt != null ? vnd(m.riskAmt) : "—"}</b>${m.riskPct != null ? ` = ${m.riskPct.toFixed(2)}% tài sản (giới hạn ${P.maxRiskPerTrade}%)` : ""}
-      ${suggest ? `<br>Khối lượng tối đa theo kỷ luật: <b>${suggest.toLocaleString("vi-VN")}</b>` : ""}`;
+  const f = planToForm(p);
+  const sel = (path, opts, cur) => `<select data-f="${path}" data-redraw="1">${Object.entries(opts).map(([k, l]) => `<option value="${k}" ${String(cur) === k ? "selected" : ""}>${l}</option>`).join("")}</select>`;
+  const inp = (path, val, ph = "", attrs = "") => `<input data-f="${path}" value="${esc(val ?? "")}" placeholder="${esc(ph)}" ${attrs}>`;
+  const draw = () => {
+    const type = f.assetType, unitTxt = type === "gold" ? UNIT_LABEL[f.unit || "chi"] : "cổ phiếu";
+    const ref = refPrice(f);
+    const pricePh = type === "gold" ? "VD: 14.8tr hoặc 148tr" : "VD: 34.15 hoặc 34k";
+    let html = `<h2>${p ? "Cập nhật kế hoạch" : "Lập kế hoạch giao dịch"}</h2>
+      <div class="fields">
+        <label class="f">Loại tài sản${sel("assetType", PLAN_TYPES, type)}</label>
+        <label class="f">Mẫu kế hoạch${sel("template", TEMPLATES[type], f.template)}</label>`;
+    if (type === "saving") {
+      const savs = state.holdings.filter(h => h.type === "saving");
+      html += `<label class="f wide">Sổ tiết kiệm<select data-f="holdingId" data-redraw="1"><option value="">Chọn sổ…</option>${savs.map(h => `<option value="${esc(h.id)}" ${f.holdingId === h.id ? "selected" : ""}>${esc(h.name)} · ${vnd(n(h.cost))} · ${price(h.rate)}%</option>`).join("")}</select></label>
+        <label class="f">Tái tục nếu lãi suất ≥ (%/năm)${inp("targetRate", f.targetRate, "VD: 6", 'inputmode="decimal"')}</label>
+        <label class="f">Nếu không đạt thì<input data-f="altAction" value="${esc(f.altAction)}" placeholder="VD: chuyển sang mua vàng, giải ngân BID"></label>`;
+    } else {
+      html += `<label class="f">${type === "gold" ? "Loại vàng" : "Mã cổ phiếu"}${inp("ticker", f.ticker, type === "gold" ? "SJC miếng (tự mua)" : "BID", 'list="plan-tickers" data-redraw-blur="1"')}</label>
+        <datalist id="plan-tickers">${state.holdings.filter(h => h.type === type).map(h => `<option value="${esc(h.name)}">`).join("")}</datalist>
+        <label class="f">Hành động${sel("side", { buy: "Mua", sell: "Bán (chốt / cắt vị thế đang có)" }, f.side)}</label>
+        ${type === "gold" ? `<label class="f">Nhập giá theo${sel("unit", UNIT_LABEL, f.unit || "chi")}</label>` : ""}
+        ${ref ? `<div class="sub" style="grid-column:1/-1">Đang có: ${price(ref.qty)} ${qtyUnit(type)} · giá vốn ${price(ref.cost)} · giá hiện tại ${price(ref.price)} ${type === "gold" ? "đ/chỉ" : "đ"}</div>` : ""}
+        <div class="rowset"><div class="sub"><b>${f.side === "sell" ? "Giá tham chiếu (giá vốn)" : "Vào lệnh"}</b> · giá mỗi ${unitTxt} · tỷ trọng %</div>
+          ${f.entries.map((e, i) => `<div class="rowline e"><input data-f="entries.${i}.raw" value="${esc(e.raw)}" placeholder="${pricePh}" inputmode="decimal" aria-label="Giá vào nấc ${i + 1}">
+            <input data-f="entries.${i}.pct" value="${esc(e.pct)}" inputmode="decimal" aria-label="Tỷ trọng nấc ${i + 1}">
+            ${f.entries.length > 1 ? `<button type="button" class="btn ghost" data-act="del-e" data-i="${i}" aria-label="Xóa nấc">✕</button>` : "<span></span>"}
+            <span class="out" data-out="e${i}"></span></div>`).join("")}
+          ${f.side === "sell" ? "" : `<button type="button" class="btn ghost" data-act="add-e" style="justify-self:start">+ Thêm nấc vào</button>`}</div>
+        <div class="rowset"><div class="sub"><b>Dừng lỗ</b></div>
+          <div class="rowline m">${sel("stop.mode", { pct: "% dưới giá vào", price: "Giá" }, f.stop.mode)}
+            <input data-f="stop.raw" value="${esc(f.stop.raw)}" placeholder="${f.stop.mode === "pct" ? "VD: 7" : pricePh}" inputmode="decimal" aria-label="Dừng lỗ">
+            <span class="out" data-out="stop"></span></div></div>
+        <div class="rowset"><div class="sub"><b>Chốt lời</b> · cách đặt · mức · bán % vị thế</div>
+          ${f.targets.map((t, i) => `<div class="rowline t">${sel(`targets.${i}.mode`, { r: "Theo R", pct: "% trên giá vào", price: "Giá" }, t.mode)}
+            <input data-f="targets.${i}.raw" value="${esc(t.raw)}" placeholder="${t.mode === "price" ? pricePh : t.mode === "r" ? "VD: 2" : "VD: 10"}" inputmode="decimal" aria-label="Mức chốt lời ${i + 1}">
+            <input data-f="targets.${i}.pct" value="${esc(t.pct)}" inputmode="decimal" aria-label="Bán % vị thế ở mức ${i + 1}">
+            <button type="button" class="btn ghost" data-act="del-t" data-i="${i}" aria-label="Xóa mức">✕</button>
+            <span class="out" data-out="t${i}"></span></div>`).join("")}
+          <button type="button" class="btn ghost" data-act="add-t" style="justify-self:start">+ Thêm mức chốt lời</button></div>
+        <div class="rowset"><div class="sub"><b>Khối lượng</b></div>
+          <div class="rowline m">${sel("size.mode", SIZE_MODES, f.size.mode)}
+            <input data-f="size.raw" value="${esc(f.size.raw)}" inputmode="decimal" placeholder="${{ risk: `Mặc định ${state.profile.maxRiskPerTrade}% tài sản`, qty: `Số ${type === "gold" ? UNIT_LABEL[f.unit || "chi"] : "cổ phiếu"}`, amount: "VD: 100tr", pct: "VD: 10" }[f.size.mode]}" aria-label="Khối lượng">
+            <span class="out" data-out="size"></span></div></div>`;
+    }
+    html += `<label class="f wide">Lý do${type === "saving" ? "" : " vào lệnh"}<textarea data-f="reason" placeholder="Luận điểm, tín hiệu, điều gì sẽ khiến bạn sai?">${esc(f.reason)}</textarea></label>
+        <label class="f">Trạng thái${sel("status", STATUS, f.status)}</label>
+        <label class="f">Hạn thực hiện<input data-f="deadline" type="date" value="${esc(f.deadline)}"></label>
+        <label class="f">Kết quả lãi/lỗ khi đóng${inp("resultPl", f.resultPl, "VD: 5tr hoặc -2tr")}</label>
+        <label class="f">Bài học rút ra${inp("lesson", f.lesson)}</label>
+      </div>
+      <div class="calc num" id="calc"></div>
+      <div class="sheet-actions"><span>${p ? `<button type="button" class="btn danger" id="del">Xóa</button>` : ""}</span><span style="display:flex;gap:8px"><button type="button" class="btn" id="cancel">Hủy</button><button class="btn primary" type="submit">Lưu</button></span></div>`;
+    const keepScroll = $(".sheet")?.scrollTop || 0;
+    sheet(html);
+    $(".sheet").scrollTop = keepScroll;
+    wire();
+    refresh();
   };
-  $("#sheet-form").addEventListener("input", calc); calc();
-  $("#cancel").onclick = closeSheet;
-  if (p) $("#del").onclick = async () => { const b = $("#del"); if (b.dataset.sure) { await deleteDoc("plans", p.id).catch(showErr); closeSheet(); toast("Đã xóa kế hoạch"); } else { b.dataset.sure = 1; b.textContent = "Bấm lần nữa để xóa"; } };
-  $("#sheet-form").onsubmit = async e => {
-    e.preventDefault();
-    const o = read(); if (!o.ticker || !o.entry) { toast("Cần ít nhất mã và giá vào lệnh"); return; }
-    o.ticker = o.ticker.toUpperCase();
-    o.created = p?.created || new Date().toISOString(); o.updated = new Date().toISOString();
-    if (p?.example) o.example = true;
-    await saveDoc("plans", p?.id || uid(), o).then(() => { closeSheet(); toast(p ? "Đã cập nhật kế hoạch" : "Đã lưu kế hoạch"); }).catch(showErr);
+  const setPath = (path, val) => { const ks = path.split("."); let o = f; ks.slice(0, -1).forEach(k => o = o[k]); o[ks.at(-1)] = val; };
+  const build = () => {
+    if (f.assetType === "saving") {
+      const h = state.holdings.find(x => x.id === f.holdingId);
+      const v = h ? valueOf(h) : null;
+      return { plan: { assetType: "saving", template: "renew", ticker: h?.name || "", holdingId: f.holdingId, amount: h ? Math.round(n(h.cost) + (v.atMaturity ?? v.pl)) : 0,
+        maturity: v?.maturity || "", curRate: n(h?.rate), targetRate: parseNum(f.targetRate), altAction: f.altAction.trim() }, c: null };
+    }
+    const c = computePlan(f);
+    return { plan: { assetType: f.assetType, template: f.template, ticker: f.assetType === "stock" ? f.ticker.trim().toUpperCase() : f.ticker.trim(), side: f.side, unit: f.unit,
+      entries: c.entries, stop: c.stop, targets: c.targets, qty: c.qty, sizeMode: f.size.mode }, c };
   };
+  const refresh = () => {
+    const { plan, c } = build();
+    if (c) for (const [k, v] of Object.entries(c.notes)) { const el = document.querySelector(`[data-out="${k}"]`); if (el) el.textContent = v; }
+    const full = { ...plan, status: f.status };
+    const m = c ? planMath(full, summary().total) : null;
+    const P = state.profile;
+    $("#calc").innerHTML = (plan.ticker ? `<div class="plan-line">${esc(planLine(full))}</div>` : `<span class="sub">Nhập ${f.assetType === "saving" ? "sổ tiết kiệm" : "mã"} để xem dòng kế hoạch chuẩn.</span>`)
+      + (m ? `<div style="margin-top:8px">Giá vào trung bình <b>${price(m.avg)}</b> · Giá trị lệnh <b>${vnd(m.size)}</b><br>
+        Lời/lỗ kỳ vọng <b class="${m.rr != null && m.rr >= 2 ? "pos" : "neg"}">${m.rr != null ? m.rr.toLocaleString("vi-VN", { maximumFractionDigits: 2 }) + " : 1" : "—"}</b>
+        · Rủi ro <b>${m.riskAmt != null ? vnd(m.riskAmt) : "—"}</b>${m.riskPct != null ? ` = <b class="${m.riskPct > n(P.maxRiskPerTrade) ? "neg" : ""}">${m.riskPct.toFixed(2)}%</b> tài sản (giới hạn ${P.maxRiskPerTrade}%)` : ""}
+        ${m.rewardAmt != null ? `· Lãi kỳ vọng <b class="pos">${vnd(m.rewardAmt)}</b>` : ""}</div>` : "")
+      + (c?.warn.length ? `<div class="neg" style="margin-top:6px">${c.warn.map(esc).join("<br>")}</div>` : "");
+  };
+  const wire = () => {
+    const form = $("#sheet-form");
+    form.addEventListener("input", e => { const k = e.target.dataset.f; if (!k || e.target.dataset.redraw) return; setPath(k, e.target.value); refresh(); });
+    form.addEventListener("change", e => {
+      const k = e.target.dataset.f; if (!k) return;
+      setPath(k, e.target.value);
+      if (k === "assetType") { f.template = Object.keys(TEMPLATES[f.assetType])[0]; if (f.assetType !== "saving") { f.ticker = ""; applyTemplate(f); } }
+      else if (k === "template" || (k === "ticker" && !p && f.template !== "custom" && !f.entries.some(x => x.raw))) applyTemplate(f);
+      if (e.target.dataset.redraw || e.target.dataset.redrawBlur) draw();
+    });
+    form.addEventListener("click", e => {
+      const b = e.target.closest("[data-act]"); if (!b) return;
+      const i = +b.dataset.i;
+      if (b.dataset.act === "add-e") f.entries.push({ raw: "", pct: Math.round(100 / (f.entries.length + 1)) });
+      if (b.dataset.act === "del-e") f.entries.splice(i, 1);
+      if (b.dataset.act === "add-t") f.targets.push({ mode: "pct", raw: "", pct: Math.max(0, 100 - f.targets.reduce((a, t) => a + n(t.pct), 0)) });
+      if (b.dataset.act === "del-t") f.targets.splice(i, 1);
+      draw();
+    });
+    $("#cancel").onclick = closeSheet;
+    if (p) $("#del").onclick = async () => { const b = $("#del"); if (b.dataset.sure) { await deleteDoc("plans", p.id).catch(showErr); closeSheet(); toast("Đã xóa kế hoạch"); } else { b.dataset.sure = 1; b.textContent = "Bấm lần nữa để xóa"; } };
+    form.onsubmit = async e => {
+      e.preventDefault();
+      const { plan, c } = build();
+      if (!plan.ticker) { toast(f.assetType === "saving" ? "Chọn sổ tiết kiệm" : "Cần nhập mã / loại tài sản"); return; }
+      if (c && !c.entries.length) { toast("Cần ít nhất một giá vào lệnh"); return; }
+      const rp = String(f.resultPl ?? "").trim();
+      const resultPl = rp ? (rp.startsWith("-") || rp.startsWith("−") ? -1 : 1) * (parseAmount(rp.replace(/^[-−+]/, "")) || 0) : null;
+      const data = { ...plan, reason: f.reason.trim(), status: f.status, deadline: f.deadline, resultPl, lesson: f.lesson.trim(), form: JSON.parse(JSON.stringify(f)),
+        created: p?.created || new Date().toISOString(), updated: new Date().toISOString() };
+      await saveDoc("plans", p?.id || uid(), data).then(() => { closeSheet(); toast(p ? "Đã cập nhật kế hoạch" : "Đã lưu kế hoạch"); }).catch(showErr);
+    };
+  };
+  if (!p) applyTemplate(f);
+  draw();
 }
 /* ---------- transactions: cash moving between assets ---------- */
 const TX = {
@@ -1010,7 +1303,7 @@ async function askMentor(q) {
     ngay: today(), tong_tai_san_rong: Math.round(s.total), lai_lo_tam_tinh: Math.round(s.pl),
     phan_bo: Object.fromEntries(TYPE_KEYS.map(k => [TYPES[k].label, { gia_tri: Math.round(s.by[k].value), ty_trong: s.total ? +(s.by[k].value / s.total * 100).toFixed(1) : 0, muc_tieu: n(state.profile.target?.[k]) }])),
     tai_san: state.holdings.map(h => ({ ...h, ...Object.fromEntries(Object.entries(valueOf(h)).map(([k, v]) => [k, typeof v === "number" ? Math.round(v) : v])) })),
-    ke_hoach: state.plans.map(p => ({ ...p, ...planMath(p, s.total) })),
+    ke_hoach: state.plans.map(({ form, ...p }) => ({ ...p, dong_chuan: planLine(p), ...(p.assetType === "saving" ? {} : planMath(p, s.total)) })),
     ho_so: state.profile,
     giao_dich_gan_day: [...state.transactions].sort((a, b) => (b.created || "").localeCompare(a.created || "")).slice(0, 20),
     canh_bao_tu_dong: insights().map(i => i.title),
@@ -1110,6 +1403,13 @@ document.addEventListener("click", async e => {
   else if (t.dataset.editH) holdingForm(state.holdings.find(h => h.id === t.dataset.editH));
   else if (t.dataset.editP) planForm(state.plans.find(p => p.id === t.dataset.editP));
   else if (t.dataset.pf) { state.planFilter = t.dataset.pf; render(); }
+  else if (t.dataset.hf) {
+    const k = t.dataset.hf, f = state.holdFilter;
+    if (k === "all") f.clear(); else if (f.has(k)) f.delete(k); else f.add(k);
+    if (f.size && TYPE_KEYS.filter(x => state.holdings.some(h => h.type === x)).every(x => f.has(x))) f.clear();
+    try { localStorage.setItem(LS + "-holdfilter", JSON.stringify([...f])); } catch (e) {}
+    render();
+  }
   else if (t.dataset.range) { state.nwRange = t.dataset.range; drawNetWorth(); }
   else if (t.dataset.q != null) { setTab("mentor"); askMentor(QUICK[+t.dataset.q]); }
   else if (t.id === "clear-ex") {

@@ -1,5 +1,5 @@
 // Offline support: same-origin files are fetched fresh when online and served from cache when offline.
-const CACHE = "mentor-dau-tu-v1";
+const CACHE = "mentor-dau-tu-v2";
 const SHELL = ["./", "index.html", "manifest.webmanifest", "icons/icon.svg", "icons/icon-192.png", "icons/icon-512.png"];
 
 self.addEventListener("install", e => {
